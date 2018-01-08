@@ -12,6 +12,8 @@ type BlockQueue interface {
 	Take() (Runnable, error)
 	// Size the size of queue
 	Size() int
+	// IsFull return true if queue is full
+	IsFull() bool
 }
 
 type node struct {
@@ -70,4 +72,8 @@ func (lq *linkedBlockingQueue) Size() (s int) {
 	s = lq.size
 	lq.notEmpty.L.Unlock()
 	return
+}
+
+func (lq *linkedBlockingQueue) IsFull() bool {
+	return false
 }
