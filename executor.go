@@ -29,14 +29,15 @@ type workerChan struct {
 
 // GoroutinePoolExecutor executor with pooled goroutie
 type GoroutinePoolExecutor struct {
-	corePoolSize, maxPoolSize, workerCount uint32
+	corePoolSize, maxPoolSize, ctl uint32
 
 	workerChanPool sync.Pool
 	queue          BlockQueue
-	queueCh        chan Runnable
 
-	locker sync.RWMutex
-	ready  []*workerChan
+	locker       sync.RWMutex
+	hasWorker    *sync.Cond
+	ready        []*workerChan
+	pendingCount sync.WaitGroup
 
 	wg          sync.WaitGroup
 	stopCh      chan struct{}
@@ -76,13 +77,14 @@ func NewPoolExecutor(
 		maxPoolSize:  maxPoolSize,
 		maxIdleTime:  keepLiveTime,
 		queue:        queue,
-		queueCh:      make(chan Runnable, 32),
 		ready:        make([]*workerChan, 0, 32),
 		stopCh:       make(chan struct{}),
 		workerChanPool: sync.Pool{New: func() interface{} {
 			return &workerChan{ch: make(chan Runnable, workerChanCap)}
 		}},
 	}
+
+	ex.hasWorker = sync.NewCond(&ex.locker)
 
 	ex.start()
 
@@ -95,12 +97,12 @@ func (e *GoroutinePoolExecutor) Execute(r Runnable) error {
 		return errBadRunnable
 	}
 
-	//if e.state() != running {
-	//return errNotRunning
-	//}
+	if e.state() != running {
+		return errNotRunning
+	}
 
 	createWorker := false
-	workerCount := atomic.LoadUint32(&e.workerCount)
+	workerCount := uint32(e.workerCountOf())
 	switch {
 	case workerCount < e.corePoolSize:
 		createWorker = true
@@ -113,16 +115,18 @@ func (e *GoroutinePoolExecutor) Execute(r Runnable) error {
 			return errQueueIsFull
 		}
 
+		e.pendingCount.Add(1)
 		e.queue.Put(r)
 		return nil
 	}
 
+	e.pendingCount.Add(1)
 	wch := e.getWorkerCh()
 	wch.ch <- r
-	go func() {
+	e.wgWrap(func() {
 		e.startWorker(wch)
 		e.workerChanPool.Put(wch)
-	}()
+	})
 
 	return nil
 }
@@ -131,16 +135,13 @@ func (e *GoroutinePoolExecutor) Execute(r Runnable) error {
 func (e *GoroutinePoolExecutor) Shutdown() {
 	e.setState(shutdown)
 	close(e.stopCh)
+
 	e.queue.Put(nil)
+	e.pendingCount.Wait()
+	e.shutdownWorker()
+
 	e.wg.Wait()
 	e.setState(stop)
-}
-
-func (e *GoroutinePoolExecutor) readyCount() (c uint32) {
-	e.locker.RLock()
-	c = uint32(len(e.ready))
-	e.locker.RUnlock()
-	return
 }
 
 func (e *GoroutinePoolExecutor) start() {
@@ -155,7 +156,9 @@ func (e *GoroutinePoolExecutor) start() {
 		}
 	})
 
-	e.wgWrap(e.startFeedFromQueue)
+	e.wgWrap(func() {
+		e.startFeedFromQueue()
+	})
 }
 
 func (e *GoroutinePoolExecutor) cleanIdle(idleWorkers *[]*workerChan) {
@@ -195,7 +198,7 @@ func (e *GoroutinePoolExecutor) getWorkerCh() *workerChan {
 		e.locker.Unlock()
 		return w
 	}
-	e.workerCount++
+	e.ctl++
 	e.locker.Unlock()
 
 	w := e.workerChanPool.Get()
@@ -206,64 +209,70 @@ func (e *GoroutinePoolExecutor) getWorkerCh() *workerChan {
 }
 
 func (e *GoroutinePoolExecutor) startWorker(wch *workerChan) {
-	var (
-		r         Runnable
-		fromQueue bool
-	)
-
-	for {
-		select {
-		case r = <-e.queueCh:
-			fromQueue = true
-		case r = <-wch.ch:
-		}
-
+	for r := range wch.ch {
 		if r == nil {
 			break
 		}
 
 		r.Run()
 
+		e.pendingCount.Done()
+
 		wch.lastUseTime = time.Now()
-		if !fromQueue {
-			e.locker.Lock()
-			e.ready = append(e.ready, wch)
-			e.locker.Unlock()
-		}
+		e.locker.Lock()
+		e.ready = append(e.ready, wch)
+		e.locker.Unlock()
+		e.hasWorker.Signal()
 	}
 
-	atomic.AddUint32(&e.workerCount, ^uint32(0))
+	atomic.AddUint32(&e.ctl, ^uint32(0))
+}
+
+func (e *GoroutinePoolExecutor) shutdownWorker() {
+	e.locker.RLock()
+	for _, w := range e.ready {
+		close(w.ch)
+	}
+	e.locker.RUnlock()
 }
 
 func (e *GoroutinePoolExecutor) startFeedFromQueue() {
 	for {
 		r, err := e.queue.Take()
 		if err != nil || r == nil {
-			return
+			break
 		}
 
-		e.queueCh <- r
+		e.hasWorker.L.Lock()
+		for len(e.ready) == 0 {
+			e.hasWorker.Wait()
+		}
+		n := len(e.ready) - 1
+		wch := e.ready[n]
+		e.ready = e.ready[:n]
+		e.hasWorker.L.Unlock()
+		wch.ch <- r
 	}
 }
 
 func (e *GoroutinePoolExecutor) workerCountOf() int {
-	c := atomic.LoadUint32(&e.workerCount)
+	c := atomic.LoadUint32(&e.ctl)
 	return int(c & capacity)
 }
 
 func (e *GoroutinePoolExecutor) state() uint32 {
-	c := atomic.LoadUint32(&e.workerCount)
-	return c &^ countBits
+	c := atomic.LoadUint32(&e.ctl)
+	return c &^ capacity
 }
 
 func (e *GoroutinePoolExecutor) setState(s uint32) {
-	//for {
-	//c := atomic.LoadUint32(&e.workerCount)
-	//nc := c&capacity | s
-	//if atomic.CompareAndSwapUint32(&e.workerCount, c, nc) {
-	//break
-	//}
-	//}
+	for {
+		c := atomic.LoadUint32(&e.ctl)
+		nc := c&capacity | s
+		if atomic.CompareAndSwapUint32(&e.ctl, c, nc) {
+			break
+		}
+	}
 }
 
 func (e *GoroutinePoolExecutor) wgWrap(f func()) {
