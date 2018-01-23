@@ -12,7 +12,7 @@ const (
 	countBits = 29
 	capacity  = (1 << countBits) - 1
 
-	running uint32 = (iota - 1) << 29
+	running int32 = (iota - 1) << 29
 	shutdown
 	stop
 )
@@ -29,7 +29,7 @@ type workerChan struct {
 
 // GoroutinePoolExecutor executor with pooled goroutie
 type GoroutinePoolExecutor struct {
-	corePoolSize, maxPoolSize, ctl uint32
+	corePoolSize, maxPoolSize, ctl int32
 
 	workerChanPool sync.Pool
 	queue          BlockQueue
@@ -60,7 +60,7 @@ var workerChanCap = func() int {
 
 // NewPoolExecutor creates GoroutinePoolExecutor
 func NewPoolExecutor(
-	corePoolSize, maxPoolSize uint32,
+	corePoolSize, maxPoolSize int32,
 	keepLiveTime time.Duration,
 	queue BlockQueue,
 ) (*GoroutinePoolExecutor, error) {
@@ -102,7 +102,7 @@ func (e *GoroutinePoolExecutor) Execute(r Runnable) error {
 	}
 
 	createWorker := false
-	workerCount := uint32(e.workerCountOf())
+	workerCount := int32(e.workerCountOf())
 	switch {
 	case workerCount < e.corePoolSize:
 		createWorker = true
@@ -225,7 +225,7 @@ func (e *GoroutinePoolExecutor) startWorker(wch *workerChan) {
 		e.hasWorker.Signal()
 	}
 
-	atomic.AddUint32(&e.ctl, ^uint32(0))
+	atomic.AddInt32(&e.ctl, -1)
 }
 
 func (e *GoroutinePoolExecutor) shutdownWorker() {
@@ -256,20 +256,20 @@ func (e *GoroutinePoolExecutor) startFeedFromQueue() {
 }
 
 func (e *GoroutinePoolExecutor) workerCountOf() int {
-	c := atomic.LoadUint32(&e.ctl)
+	c := atomic.LoadInt32(&e.ctl)
 	return int(c & capacity)
 }
 
-func (e *GoroutinePoolExecutor) state() uint32 {
-	c := atomic.LoadUint32(&e.ctl)
+func (e *GoroutinePoolExecutor) state() int32 {
+	c := atomic.LoadInt32(&e.ctl)
 	return c &^ capacity
 }
 
-func (e *GoroutinePoolExecutor) setState(s uint32) {
+func (e *GoroutinePoolExecutor) setState(s int32) {
 	for {
-		c := atomic.LoadUint32(&e.ctl)
+		c := atomic.LoadInt32(&e.ctl)
 		nc := c&capacity | s
-		if atomic.CompareAndSwapUint32(&e.ctl, c, nc) {
+		if atomic.CompareAndSwapInt32(&e.ctl, c, nc) {
 			break
 		}
 	}
