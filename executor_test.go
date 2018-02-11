@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,17 +19,15 @@ type ncounter struct {
 }
 
 func (c *ncounter) Run() {
-	//atomic.AddInt32(&c.count, 1)
-	fmt.Printf("c:%d\n", atomic.AddInt32(&c.count, 1))
+	atomic.AddInt32(&c.count, 1)
+	//fmt.Printf("c:%d\n", atomic.AddInt32(&c.count, 1))
+	time.Sleep(time.Nanosecond)
 	c.WaitGroup.Done()
 }
 
-func TestExecutor(t *testing.T) {
-	t.Run("max idle time", testMaxIdleTime)
-}
-
 func TestWorkerCount(t *testing.T) {
-	e, _ := NewPoolExecutor(2, 2, time.Hour, NewLinkedBlockingQueue())
+	workerCount := int32(20)
+	e, _ := NewPoolExecutor("workerCount", workerCount, workerCount, time.Hour, NewLinkedBlockingQueue())
 	assert.Equal(t, 0, e.workerCountOf())
 	c := &ncounter{}
 	c.Add(1)
@@ -56,11 +53,11 @@ func TestWorkerCount(t *testing.T) {
 	}
 	assert.True(t, e.queue.Size() > 0)
 	c.Wait()
-	assert.Equal(t, 2, e.workerCountOf())
+	assert.Equal(t, int(workerCount), e.workerCountOf())
 	assert.Equal(t, int32(taskCount), c.count)
 }
 
-func testMaxIdleTime(t *testing.T) {
+func TestMaxIdleTime(t *testing.T) {
 	e := &GoroutinePoolExecutor{
 		corePoolSize: 2,
 		maxPoolSize:  4,
@@ -88,7 +85,7 @@ func TestState(t *testing.T) {
 }
 
 func TestShutdown(t *testing.T) {
-	e, _ := NewPoolExecutor(6, 6, time.Hour, NewLinkedBlockingQueue())
+	e, _ := NewPoolExecutor("shutdown", 6, 6, time.Hour, NewLinkedBlockingQueue())
 	assert.Equal(t, 0, e.workerCountOf())
 	c := &ncounter{}
 	taskCount := 10000

@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ type workerChan struct {
 type GoroutinePoolExecutor struct {
 	corePoolSize, maxPoolSize, ctl int32
 
+	name           string
 	workerChanPool sync.Pool
 	queue          BlockQueue
 
@@ -60,6 +62,7 @@ var workerChanCap = func() int {
 
 // NewPoolExecutor creates GoroutinePoolExecutor
 func NewPoolExecutor(
+	name string,
 	corePoolSize, maxPoolSize int32,
 	keepLiveTime time.Duration,
 	queue BlockQueue,
@@ -73,6 +76,7 @@ func NewPoolExecutor(
 	}
 
 	ex := &GoroutinePoolExecutor{
+		name:         name,
 		corePoolSize: corePoolSize,
 		maxPoolSize:  maxPoolSize,
 		maxIdleTime:  keepLiveTime,
@@ -121,12 +125,15 @@ func (e *GoroutinePoolExecutor) Execute(r Runnable) error {
 	}
 
 	e.pendingCount.Add(1)
-	wch := e.getWorkerCh()
-	wch.ch <- r
-	e.wgWrap(func() {
-		e.startWorker(wch)
-		e.workerChanPool.Put(wch)
-	})
+	w, isNew := e.getWorkerCh()
+	w.ch <- r
+
+	if isNew {
+		e.wgWrap(func() {
+			e.startWorker(w)
+			e.workerChanPool.Put(w)
+		})
+	}
 
 	return nil
 }
@@ -187,25 +194,28 @@ func (e *GoroutinePoolExecutor) cleanIdle(idleWorkers *[]*workerChan) {
 	}
 }
 
-func (e *GoroutinePoolExecutor) getWorkerCh() *workerChan {
+func (e *GoroutinePoolExecutor) getWorkerCh() (w *workerChan, isNew bool) {
 	e.locker.Lock()
 	ready := e.ready
 	n := len(ready) - 1
 	if n >= 0 {
-		w := ready[n]
+		w = ready[n]
 		ready[n] = nil
 		e.ready = ready[:n]
 		e.locker.Unlock()
-		return w
+		return
 	}
 	e.ctl++
 	e.locker.Unlock()
 
-	w := e.workerChanPool.Get()
-	if w != nil {
-		return w.(*workerChan)
+	isNew = true
+	w0 := e.workerChanPool.Get()
+	if w0 != nil {
+		w = w0.(*workerChan)
+	} else {
+		w = &workerChan{ch: make(chan Runnable, workerChanCap)}
 	}
-	return &workerChan{ch: make(chan Runnable, workerChanCap)}
+	return
 }
 
 func (e *GoroutinePoolExecutor) startWorker(wch *workerChan) {
@@ -260,6 +270,11 @@ func (e *GoroutinePoolExecutor) workerCountOf() int {
 	return int(c & capacity)
 }
 
+// WorkerCount returns the worker count in the executor
+func (e *GoroutinePoolExecutor) WorkerCount() int {
+	return e.workerCountOf()
+}
+
 func (e *GoroutinePoolExecutor) state() int32 {
 	c := atomic.LoadInt32(&e.ctl)
 	return c &^ capacity
@@ -275,10 +290,28 @@ func (e *GoroutinePoolExecutor) setState(s int32) {
 	}
 }
 
+// ReadyCount returns the count of goroutine ready to run task
+func (e *GoroutinePoolExecutor) ReadyCount() int {
+	e.locker.RLock()
+	c := len(e.ready)
+	e.locker.RUnlock()
+	return c
+}
+
 func (e *GoroutinePoolExecutor) wgWrap(f func()) {
 	e.wg.Add(1)
 	go func() {
 		f()
 		e.wg.Done()
 	}()
+}
+
+func (e *GoroutinePoolExecutor) String() string {
+	e.locker.RLock()
+	l := len(e.ready)
+	e.locker.RUnlock()
+	return fmt.Sprintf(
+		"GoroutinePoolExecutor:[name=%s,workerCount=%d, idleWorker=%d,corePoolSize=%d, maxPoolSize=%d,queue size=%d,queue is full=%t]",
+		e.name, e.workerCountOf(), l, e.corePoolSize, e.maxPoolSize, e.queue.Size(), e.queue.IsFull(),
+	)
 }
