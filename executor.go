@@ -87,7 +87,6 @@ func NewPoolExecutor(
 			return &workerChan{ch: make(chan Runnable, workerChanCap)}
 		}},
 	}
-
 	ex.hasWorker = sync.NewCond(&ex.locker)
 
 	ex.start()
@@ -155,11 +154,15 @@ func (e *GoroutinePoolExecutor) start() {
 	e.setState(running)
 	e.wgWrap(func() {
 		idleWorkers := make([]*workerChan, 0, 128)
-		select {
-		case <-e.stopCh:
-			return
-		default:
-			e.cleanIdle(&idleWorkers)
+		ticker := time.NewTicker(e.maxIdleTime / 2)
+		for {
+			select {
+			case <-ticker.C:
+				e.cleanIdle(&idleWorkers)
+			case <-e.stopCh:
+				ticker.Stop()
+				return
+			}
 		}
 	})
 
@@ -231,8 +234,8 @@ func (e *GoroutinePoolExecutor) startWorker(wch *workerChan) {
 		wch.lastUseTime = time.Now()
 		e.locker.Lock()
 		e.ready = append(e.ready, wch)
-		e.locker.Unlock()
 		e.hasWorker.Signal()
+		e.locker.Unlock()
 	}
 
 	atomic.AddInt32(&e.ctl, -1)
@@ -253,14 +256,16 @@ func (e *GoroutinePoolExecutor) startFeedFromQueue() {
 			break
 		}
 
-		e.hasWorker.L.Lock()
+		e.locker.Lock()
 		for len(e.ready) == 0 {
 			e.hasWorker.Wait()
 		}
 		n := len(e.ready) - 1
 		wch := e.ready[n]
+		e.ready[n] = nil
 		e.ready = e.ready[:n]
-		e.hasWorker.L.Unlock()
+		e.locker.Unlock()
+
 		wch.ch <- r
 	}
 }

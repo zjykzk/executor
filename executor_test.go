@@ -97,6 +97,7 @@ func TestShutdown(t *testing.T) {
 		}
 	}
 	assert.True(t, e.queue.Size() > 0)
+	time.Sleep(time.Millisecond)
 	e.Shutdown()
 	assert.Equal(t, stop, e.state())
 	assert.Equal(t, 0, e.queue.Size())
