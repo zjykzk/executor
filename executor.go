@@ -113,6 +113,7 @@ func (e *GoroutinePoolExecutor) start() {
 
 func (e *GoroutinePoolExecutor) cleanIdle(idleWorkers *[]*workerChan) {
 	now := time.Now()
+
 	e.locker.Lock()
 	ready := e.ready
 	n, l, maxIdleDuration := 0, len(ready), e.maxIdleWorkerDuration
